@@ -167,4 +167,38 @@ input:focus,select:focus{border-color:rgba(246,178,26,.35)}
 table{width:100%; border-collapse:collapse}
 th,td{padding:10px; border-bottom:1px solid var(--border); text-align:left; font-size:13px}
 th{color:var(--muted); font-weight:700}
+.tabs{
+  display:flex;
+  gap:10px;
+  margin-bottom:14px;
+}
+.tab{
+  padding:10px 12px;
+  border-radius:12px;
+  border:1px solid var(--border);
+  background:#0f1520;
+  color:var(--text);
+  cursor:pointer;
+  font-weight:700;
+}
+.tab.active{
+  border-color:rgba(246,178,26,.4);
+  box-shadow:0 0 0 2px rgba(246,178,26,.12) inset;
+}
+.list{
+  margin-top:12px;
+  display:flex;
+  flex-direction:column;
+  gap:10px;
+}
+.listItem{
+  display:flex;
+  justify-content:space-between;
+  gap:10px;
+  align-items:center;
+  padding:10px;
+  border-radius:12px;
+  border:1px solid var(--border);
+  background:#0f1520;
+}
 
