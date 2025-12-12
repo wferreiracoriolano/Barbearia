@@ -284,5 +284,112 @@ app.post("/api/admin/barbers", auth, isAdmin, async (req, res) => {
   } catch (e) {
     res.status(500).json({ error: "Erro ao criar barbeiro" });
   }
-}
+});
 
+// Listar barbeiros (admin também)
+app.get("/api/admin/barbers", auth, isAdmin, async (req, res) => {
+  try {
+    const rows = await all(`SELECT id, name, active FROM barbers ORDER BY name`);
+    res.json(rows);
+  } catch (e) {
+    res.status(500).json({ error: "Erro ao listar barbeiros" });
+  }
+});
+
+// Criar slot (horário livre)
+app.post("/api/admin/slots", auth, isAdmin, async (req, res) => {
+  try {
+    const { barber_id, date, time } = req.body || {};
+    const barberId = Number(barber_id);
+
+    if (!barberId || !date || !time) {
+      return res.status(400).json({ error: "barber_id, date(YYYY-MM-DD), time(HH:MM) obrigatórios" });
+    }
+
+    await run(
+      `INSERT INTO slots (barber_id, date, time, status)
+       VALUES (?, ?, ?, 'FREE')`,
+      [barberId, date, time]
+    );
+
+    res.json({ ok: true });
+  } catch (e) {
+    const msg = String(e.message || e);
+    if (msg.includes("UNIQUE")) return res.status(409).json({ error: "Esse horário já existe para esse barbeiro" });
+    res.status(500).json({ error: "Erro ao criar horário", details: msg });
+  }
+});
+
+// Bloquear slot
+app.post("/api/admin/slots/:id/block", auth, isAdmin, async (req, res) => {
+  try {
+    const slotId = Number(req.params.id);
+    if (!slotId) return res.status(400).json({ error: "id inválido" });
+
+    const slot = await get(`SELECT * FROM slots WHERE id=?`, [slotId]);
+    if (!slot) return res.status(404).json({ error: "Horário não encontrado" });
+    if (slot.status === "BOOKED") return res.status(409).json({ error: "Não pode bloquear um horário já marcado" });
+
+    await run(`UPDATE slots SET status='BLOCKED', client_id=NULL, appointment_type=NULL WHERE id=?`, [slotId]);
+    res.json({ ok: true });
+  } catch (e) {
+    res.status(500).json({ error: "Erro ao bloquear" });
+  }
+});
+
+// Listar slots por barbeiro/data (admin: ver tudo)
+app.get("/api/admin/slots", auth, isAdmin, async (req, res) => {
+  try {
+    const barberId = Number(req.query.barber_id);
+    const date = String(req.query.date || "");
+    if (!barberId || !date) return res.status(400).json({ error: "barber_id e date obrigatórios" });
+
+    const rows = await all(
+      `SELECT s.id, s.date, s.time, s.status,
+              u.name as client_name, s.appointment_type
+       FROM slots s
+       LEFT JOIN users u ON u.id = s.client_id
+       WHERE s.barber_id = ? AND s.date = ?
+       ORDER BY s.time`,
+      [barberId, date]
+    );
+
+    res.json(rows);
+  } catch (e) {
+    res.status(500).json({ error: "Erro ao listar slots" });
+  }
+});
+
+// Listar agendamentos marcados
+app.get("/api/admin/bookings", auth, isAdmin, async (req, res) => {
+  try {
+    const rows = await all(
+      `SELECT s.id, s.date, s.time, s.appointment_type,
+              b.name as barber_name,
+              u.name as client_name, u.email as client_email
+       FROM slots s
+       JOIN barbers b ON b.id = s.barber_id
+       LEFT JOIN users u ON u.id = s.client_id
+       WHERE s.status='BOOKED'
+       ORDER BY s.date DESC, s.time DESC`
+    );
+    res.json(rows);
+  } catch (e) {
+    res.status(500).json({ error: "Erro ao listar agendamentos" });
+  }
+});
+
+// Página default
+app.get("/", (req, res) => {
+  res.sendFile(path.join(__dirname, "public", "index.html"));
+});
+
+// Start
+initDb()
+  .then(() => {
+    app.listen(PORT, () => console.log("Servidor rodando na porta", PORT, "| DB:", dbPath));
+  })
+  .catch((e) => {
+    console.error("Falha ao iniciar DB:", e);
+    process.exit(1);
+  });
