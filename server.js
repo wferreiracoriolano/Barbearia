@@ -6,7 +6,7 @@ const sqlite3 = require("sqlite3").verbose();
 const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
 
-console.log(">>> VERSAO SERVER: 2025-12-12 v5 FULL");
+console.log(">>> VERSAO SERVER: 2025-12-12 v6 FULL");
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -42,7 +42,7 @@ const db = new sqlite3.Database(
   }
 );
 
-// ===== Helpers =====
+// Helpers
 function run(sql, params = []) {
   return new Promise((resolve, reject) => {
     db.run(sql, params, function (err) {
@@ -62,7 +62,7 @@ function all(sql, params = []) {
   });
 }
 
-// ===== Auth =====
+// Auth
 function auth(req, res, next) {
   const token = req.headers.authorization?.split(" ")[1];
   if (!token) return res.status(401).json({ error: "Sem token" });
@@ -74,13 +74,11 @@ function auth(req, res, next) {
   }
 }
 function adminOnly(req, res, next) {
-  if (req.user.role !== "admin") {
-    return res.status(403).json({ error: "Acesso negado" });
-  }
+  if (req.user.role !== "admin") return res.status(403).json({ error: "Acesso negado" });
   next();
 }
 
-// ===== Init DB =====
+// Init DB
 async function initDB() {
   await run(`
     CREATE TABLE IF NOT EXISTS users (
@@ -118,7 +116,7 @@ async function initDB() {
     )
   `);
 
-  // Admin seed (somente 1 admin padrão)
+  // Admin seed
   const admin = await get("SELECT * FROM users WHERE email = ?", ["admin@teste.com"]);
   if (!admin) {
     const hash = await bcrypt.hash("123456", 10);
@@ -129,10 +127,10 @@ async function initDB() {
     console.log("✅ Admin seed: admin@teste.com / 123456");
   }
 
-  // ❌ NÃO cria barbeiros automaticamente (SEM SEED)
+  // ✅ SEM barbeiro seed (não cria nenhum automático)
 }
 
-// ===== Rotas =====
+// Rotas
 app.get("/api/health", (req, res) => res.json({ ok: true, db: dbPath }));
 
 app.post("/api/login", async (req, res) => {
@@ -140,22 +138,22 @@ app.post("/api/login", async (req, res) => {
   const password = String(req.body?.password || "");
 
   const user = await get("SELECT * FROM users WHERE email = ? AND active=1", [email]);
-  if (!user) return res.status(401).json({ error: "Login inválido" });
+  if (!user) return res.status(401).json({ error: "Email ou senha inválidos" });
 
   const ok = await bcrypt.compare(password, user.password);
-  if (!ok) return res.status(401).json({ error: "Login inválido" });
+  if (!ok) return res.status(401).json({ error: "Email ou senha inválidos" });
 
   const token = jwt.sign({ id: user.id, role: user.role, name: user.name }, JWT_SECRET);
   res.json({ token, user: { id: user.id, name: user.name, role: user.role } });
 });
 
-// ===== Barbeiros (cliente/admin) =====
+// Barbeiros (cliente/admin)
 app.get("/api/barbers", auth, async (req, res) => {
-  const rows = await all("SELECT id,name,active,created_at FROM barbers WHERE active=1 ORDER BY name");
+  const rows = await all("SELECT id,name FROM barbers WHERE active=1 ORDER BY name");
   res.json(rows);
 });
 
-// ===== Slots livres (cliente) =====
+// Slots livres (cliente)
 app.get("/api/slots", auth, async (req, res) => {
   const barberId = Number(req.query?.barber_id);
   const date = String(req.query?.date || "");
@@ -169,22 +167,7 @@ app.get("/api/slots", auth, async (req, res) => {
   res.json(rows);
 });
 
-// ===== Agendamentos do usuário (cliente) =====
-app.get("/api/mybookings", auth, async (req, res) => {
-  const rows = await all(
-    `
-    SELECT s.id, s.barber_id, b.name as barber_name, s.date, s.time, s.status, s.type
-    FROM slots s
-    JOIN barbers b ON b.id = s.barber_id
-    WHERE s.client_id = ? AND s.status='BOOKED'
-    ORDER BY s.date DESC, s.time DESC
-    `,
-    [req.user.id]
-  );
-  res.json(rows);
-});
-
-// ===== Marcar (cliente) =====
+// Marcar (cliente)
 app.post("/api/book", auth, async (req, res) => {
   const slotId = Number(req.body?.slot_id);
   const type = String(req.body?.type || "AVULSO").toUpperCase();
@@ -200,7 +183,6 @@ app.post("/api/book", auth, async (req, res) => {
     "UPDATE slots SET status='BOOKED', client_id=?, type=? WHERE id=? AND status='FREE'",
     [req.user.id, type, slotId]
   );
-
   res.json({ ok: true });
 });
 
@@ -231,9 +213,7 @@ app.post("/api/admin/users", auth, adminOnly, async (req, res) => {
 
 // listar usuários
 app.get("/api/admin/users", auth, adminOnly, async (req, res) => {
-  const rows = await all(
-    "SELECT id,name,phone,email,role,active,created_at FROM users ORDER BY created_at DESC"
-  );
+  const rows = await all("SELECT id,name,phone,email,role,active,created_at FROM users ORDER BY created_at DESC");
   res.json(rows);
 });
 
@@ -241,12 +221,11 @@ app.get("/api/admin/users", auth, adminOnly, async (req, res) => {
 app.post("/api/admin/barbers", auth, adminOnly, async (req, res) => {
   const name = String(req.body?.name || "").trim();
   if (!name) return res.status(400).json({ error: "Nome do barbeiro é obrigatório" });
-
   await run("INSERT INTO barbers (name,active) VALUES (?,1)", [name]);
   res.json({ ok: true });
 });
 
-// listar barbeiros (admin)
+// listar barbeiros
 app.get("/api/admin/barbers", auth, adminOnly, async (req, res) => {
   const rows = await all("SELECT id,name,active,created_at FROM barbers ORDER BY created_at DESC");
   res.json(rows);
@@ -261,13 +240,9 @@ app.post("/api/admin/slots/free", auth, adminOnly, async (req, res) => {
   if (!barberId || !date || !time) return res.status(400).json({ error: "barber_id, date, time obrigatórios" });
 
   try {
-    await run(
-      "INSERT INTO slots (barber_id,date,time,status) VALUES (?,?,?,'FREE')",
-      [barberId, date, time]
-    );
+    await run("INSERT INTO slots (barber_id,date,time,status) VALUES (?,?,?,'FREE')", [barberId, date, time]);
     res.json({ ok: true });
-  } catch (e) {
-    // UNIQUE(barber_id,date,time) evita duplicar
+  } catch {
     res.status(409).json({ error: "Esse horário já existe" });
   }
 });
@@ -281,13 +256,9 @@ app.post("/api/admin/slots/block", auth, adminOnly, async (req, res) => {
   if (!barberId || !date || !time) return res.status(400).json({ error: "barber_id, date, time obrigatórios" });
 
   try {
-    await run(
-      "INSERT INTO slots (barber_id,date,time,status) VALUES (?,?,?,'BLOCKED')",
-      [barberId, date, time]
-    );
+    await run("INSERT INTO slots (barber_id,date,time,status) VALUES (?,?,?,'BLOCKED')", [barberId, date, time]);
     res.json({ ok: true });
   } catch {
-    // se já existe, atualiza pra BLOCKED
     await run(
       "UPDATE slots SET status='BLOCKED', client_id=NULL, type=NULL WHERE barber_id=? AND date=? AND time=?",
       [barberId, date, time]
@@ -296,7 +267,7 @@ app.post("/api/admin/slots/block", auth, adminOnly, async (req, res) => {
   }
 });
 
-// ver agenda do dia (admin)
+// ver agenda do dia
 app.get("/api/admin/slots", auth, adminOnly, async (req, res) => {
   const barberId = Number(req.query?.barber_id);
   const date = String(req.query?.date || "");
