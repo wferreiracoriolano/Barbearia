@@ -6,7 +6,7 @@ const sqlite3 = require("sqlite3").verbose();
 const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
 
-console.log(">>> VERSAO SERVER: 2025-12-12 v6 FULL");
+console.log(">>> VERSAO SERVER: 2025-12-12 v7 SERVICES");
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -21,12 +21,7 @@ const JWT_SECRET = process.env.JWT_SECRET || "DEV_SECRET";
 const isRender = !!process.env.RENDER;
 const dataDir = isRender ? "/tmp" : __dirname;
 
-try {
-  fs.mkdirSync(dataDir, { recursive: true });
-} catch (e) {
-  console.error("Falha criando dataDir:", dataDir, e?.message);
-}
-
+try { fs.mkdirSync(dataDir, { recursive: true }); } catch {}
 const dbPath = path.join(dataDir, "barbearia.db");
 console.log(">>> DB PATH =", dbPath);
 
@@ -42,12 +37,10 @@ const db = new sqlite3.Database(
   }
 );
 
-// Helpers
 function run(sql, params = []) {
   return new Promise((resolve, reject) => {
     db.run(sql, params, function (err) {
-      if (err) reject(err);
-      else resolve(this);
+      if (err) reject(err); else resolve(this);
     });
   });
 }
@@ -66,19 +59,23 @@ function all(sql, params = []) {
 function auth(req, res, next) {
   const token = req.headers.authorization?.split(" ")[1];
   if (!token) return res.status(401).json({ error: "Sem token" });
-  try {
-    req.user = jwt.verify(token, JWT_SECRET);
-    next();
-  } catch {
-    return res.status(401).json({ error: "Token inválido" });
-  }
+  try { req.user = jwt.verify(token, JWT_SECRET); next(); }
+  catch { return res.status(401).json({ error: "Token inválido" }); }
 }
 function adminOnly(req, res, next) {
   if (req.user.role !== "admin") return res.status(403).json({ error: "Acesso negado" });
   next();
 }
 
-// Init DB
+async function ensureColumn(table, col, typeSql) {
+  const cols = await all(`PRAGMA table_info(${table})`);
+  const exists = cols.some(c => c.name === col);
+  if (!exists) {
+    await run(`ALTER TABLE ${table} ADD COLUMN ${col} ${typeSql}`);
+    console.log(`✅ MIGRATION: added ${table}.${col}`);
+  }
+}
+
 async function initDB() {
   await run(`
     CREATE TABLE IF NOT EXISTS users (
@@ -103,6 +100,16 @@ async function initDB() {
   `);
 
   await run(`
+    CREATE TABLE IF NOT EXISTS services (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      name TEXT NOT NULL UNIQUE,
+      duration_minutes INTEGER NOT NULL,
+      active INTEGER DEFAULT 1,
+      created_at TEXT DEFAULT CURRENT_TIMESTAMP
+    )
+  `);
+
+  await run(`
     CREATE TABLE IF NOT EXISTS slots (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       barber_id INTEGER NOT NULL,
@@ -116,6 +123,9 @@ async function initDB() {
     )
   `);
 
+  // MIGRATION: slots.service_id
+  await ensureColumn("slots", "service_id", "INTEGER");
+
   // Admin seed
   const admin = await get("SELECT * FROM users WHERE email = ?", ["admin@teste.com"]);
   if (!admin) {
@@ -127,10 +137,25 @@ async function initDB() {
     console.log("✅ Admin seed: admin@teste.com / 123456");
   }
 
-  // ✅ SEM barbeiro seed (não cria nenhum automático)
+  // Serviços pré-definidos
+  const defaults = [
+    { name: "Sobrancelha", duration: 15 },
+    { name: "Cabelo", duration: 30 },
+    { name: "Barba", duration: 30 },
+    { name: "Pezinho", duration: 30 },
+    { name: "Cabelo + Barba", duration: 60 },
+  ];
+
+  for (const s of defaults) {
+    const exists = await get("SELECT id FROM services WHERE name=?", [s.name]);
+    if (!exists) {
+      await run("INSERT INTO services (name,duration_minutes,active) VALUES (?,?,1)", [s.name, s.duration]);
+      console.log("✅ Service seed:", s.name);
+    }
+  }
 }
 
-// Rotas
+// ============ API ============
 app.get("/api/health", (req, res) => res.json({ ok: true, db: dbPath }));
 
 app.post("/api/login", async (req, res) => {
@@ -147,7 +172,13 @@ app.post("/api/login", async (req, res) => {
   res.json({ token, user: { id: user.id, name: user.name, role: user.role } });
 });
 
-// Barbeiros (cliente/admin)
+// Services (cliente/admin)
+app.get("/api/services", auth, async (req, res) => {
+  const rows = await all("SELECT id,name,duration_minutes FROM services WHERE active=1 ORDER BY duration_minutes, name");
+  res.json(rows);
+});
+
+// Barbeiros
 app.get("/api/barbers", auth, async (req, res) => {
   const rows = await all("SELECT id,name FROM barbers WHERE active=1 ORDER BY name");
   res.json(rows);
@@ -157,7 +188,6 @@ app.get("/api/barbers", auth, async (req, res) => {
 app.get("/api/slots", auth, async (req, res) => {
   const barberId = Number(req.query?.barber_id);
   const date = String(req.query?.date || "");
-
   if (!barberId || !date) return res.status(400).json({ error: "barber_id e date são obrigatórios" });
 
   const rows = await all(
@@ -167,28 +197,31 @@ app.get("/api/slots", auth, async (req, res) => {
   res.json(rows);
 });
 
-// Marcar (cliente)
+// Marcar (cliente) com service_id
 app.post("/api/book", auth, async (req, res) => {
   const slotId = Number(req.body?.slot_id);
   const type = String(req.body?.type || "AVULSO").toUpperCase();
+  const serviceId = Number(req.body?.service_id);
 
   if (!slotId) return res.status(400).json({ error: "slot_id é obrigatório" });
+  if (!serviceId) return res.status(400).json({ error: "service_id é obrigatório" });
   if (type !== "AVULSO" && type !== "ASSINATURA") return res.status(400).json({ error: "type inválido" });
 
   const slot = await get("SELECT * FROM slots WHERE id=?", [slotId]);
   if (!slot) return res.status(404).json({ error: "Horário não encontrado" });
   if (slot.status !== "FREE") return res.status(409).json({ error: "Este horário não está livre" });
 
+  const svc = await get("SELECT id FROM services WHERE id=? AND active=1", [serviceId]);
+  if (!svc) return res.status(400).json({ error: "Serviço inválido" });
+
   await run(
-    "UPDATE slots SET status='BOOKED', client_id=?, type=? WHERE id=? AND status='FREE'",
-    [req.user.id, type, slotId]
+    "UPDATE slots SET status='BOOKED', client_id=?, type=?, service_id=? WHERE id=? AND status='FREE'",
+    [req.user.id, type, serviceId, slotId]
   );
   res.json({ ok: true });
 });
 
 // ===================== ADMIN =====================
-
-// criar usuário
 app.post("/api/admin/users", auth, adminOnly, async (req, res) => {
   const name = String(req.body?.name || "").trim();
   const phone = String(req.body?.phone || "").trim();
@@ -203,21 +236,15 @@ app.post("/api/admin/users", auth, adminOnly, async (req, res) => {
   if (exists) return res.status(409).json({ error: "Email já cadastrado" });
 
   const hash = await bcrypt.hash(password, 10);
-  await run(
-    "INSERT INTO users (name,phone,email,password,role,active) VALUES (?,?,?,?,?,1)",
-    [name, phone, email, hash, role]
-  );
-
+  await run("INSERT INTO users (name,phone,email,password,role,active) VALUES (?,?,?,?,?,1)", [name, phone, email, hash, role]);
   res.json({ ok: true });
 });
 
-// listar usuários
 app.get("/api/admin/users", auth, adminOnly, async (req, res) => {
   const rows = await all("SELECT id,name,phone,email,role,active,created_at FROM users ORDER BY created_at DESC");
   res.json(rows);
 });
 
-// criar barbeiro
 app.post("/api/admin/barbers", auth, adminOnly, async (req, res) => {
   const name = String(req.body?.name || "").trim();
   if (!name) return res.status(400).json({ error: "Nome do barbeiro é obrigatório" });
@@ -225,9 +252,14 @@ app.post("/api/admin/barbers", auth, adminOnly, async (req, res) => {
   res.json({ ok: true });
 });
 
-// listar barbeiros
 app.get("/api/admin/barbers", auth, adminOnly, async (req, res) => {
   const rows = await all("SELECT id,name,active,created_at FROM barbers ORDER BY created_at DESC");
+  res.json(rows);
+});
+
+// Admin: services list (opcional mostrar no painel depois)
+app.get("/api/admin/services", auth, adminOnly, async (req, res) => {
+  const rows = await all("SELECT id,name,duration_minutes,active FROM services ORDER BY duration_minutes,name");
   res.json(rows);
 });
 
@@ -236,7 +268,6 @@ app.post("/api/admin/slots/free", auth, adminOnly, async (req, res) => {
   const barberId = Number(req.body?.barber_id);
   const date = String(req.body?.date || "");
   const time = String(req.body?.time || "");
-
   if (!barberId || !date || !time) return res.status(400).json({ error: "barber_id, date, time obrigatórios" });
 
   try {
@@ -252,7 +283,6 @@ app.post("/api/admin/slots/block", auth, adminOnly, async (req, res) => {
   const barberId = Number(req.body?.barber_id);
   const date = String(req.body?.date || "");
   const time = String(req.body?.time || "");
-
   if (!barberId || !date || !time) return res.status(400).json({ error: "barber_id, date, time obrigatórios" });
 
   try {
@@ -260,14 +290,14 @@ app.post("/api/admin/slots/block", auth, adminOnly, async (req, res) => {
     res.json({ ok: true });
   } catch {
     await run(
-      "UPDATE slots SET status='BLOCKED', client_id=NULL, type=NULL WHERE barber_id=? AND date=? AND time=?",
+      "UPDATE slots SET status='BLOCKED', client_id=NULL, type=NULL, service_id=NULL WHERE barber_id=? AND date=? AND time=?",
       [barberId, date, time]
     );
     res.json({ ok: true, updated: true });
   }
 });
 
-// ver agenda do dia
+// ver agenda do dia (agora retorna serviço + duração)
 app.get("/api/admin/slots", auth, adminOnly, async (req, res) => {
   const barberId = Number(req.query?.barber_id);
   const date = String(req.query?.date || "");
@@ -276,9 +306,11 @@ app.get("/api/admin/slots", auth, adminOnly, async (req, res) => {
   const rows = await all(
     `
     SELECT s.id,s.barber_id,s.date,s.time,s.status,s.type,
-           u.name as client_name, u.email as client_email
+           u.name as client_name, u.email as client_email,
+           sv.name as service_name, sv.duration_minutes as service_minutes
     FROM slots s
     LEFT JOIN users u ON u.id = s.client_id
+    LEFT JOIN services sv ON sv.id = s.service_id
     WHERE s.barber_id=? AND s.date=?
     ORDER BY s.time
     `,
