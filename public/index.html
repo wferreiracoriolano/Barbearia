@@ -1,1 +1,78 @@
+<!doctype html>
+<html lang="pt-br">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Barbearia - Agendamento</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <div class="container">
+    <header class="top">
+      <h1>Barbearia</h1>
+      <div id="userBadge" class="badge hidden"></div>
+      <button id="btnLogout" class="btn btn-ghost hidden">Sair</button>
+    </header>
+
+    <!-- LOGIN -->
+    <section id="secLogin" class="card">
+      <h2>Login</h2>
+      <div class="grid">
+        <label>
+          Email
+          <input id="loginEmail" type="email" placeholder="ex: cliente@teste.com" />
+        </label>
+        <label>
+          Senha
+          <input id="loginPass" type="password" placeholder="••••••" />
+        </label>
+      </div>
+      <button id="btnLogin" class="btn">Entrar</button>
+      <p class="hint">
+        Admin seed: <b>admin@teste.com</b> / <b>123456</b>
+      </p>
+      <div id="loginMsg" class="msg"></div>
+    </section>
+
+    <!-- CLIENTE -->
+    <section id="secClient" class="card hidden">
+      <h2>Agendar</h2>
+
+      <div class="step">
+        <h3>1) Escolha o barbeiro</h3>
+        <select id="selBarber"></select>
+      </div>
+
+      <div class="step">
+        <h3>2) Tipo de atendimento</h3>
+        <div class="row">
+          <label class="radio">
+            <input type="radio" name="apptType" value="ASSINATURA" checked />
+            Assinatura
+          </label>
+          <label class="radio">
+            <input type="radio" name="apptType" value="AVULSO" />
+            Avulso
+          </label>
+        </div>
+      </div>
+
+      <div class="step">
+        <h3>3) Selecione a data</h3>
+        <input id="selDate" type="date" />
+      </div>
+
+      <div class="step">
+        <h3>4) Horários disponíveis</h3>
+        <button id="btnLoadSlots" class="btn btn-secondary">Carregar horários</button>
+        <div id="slotsWrap" class="slots"></div>
+      </div>
+
+      <div id="clientMsg" class="msg"></div>
+    </section>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>
 
