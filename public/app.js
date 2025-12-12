@@ -1,4 +1,4 @@
-const KEYS = { session: "barb_session_v2" };
+const KEYS = { session: "barb_session_v3" };
 const $ = (id) => document.getElementById(id);
 
 function setSession(data){ localStorage.setItem(KEYS.session, JSON.stringify(data)); }
@@ -15,14 +15,10 @@ async function api(url, opts={}){
   const s = getSession();
   const headers = Object.assign({ "Content-Type":"application/json" }, opts.headers||{});
   if(s?.token) headers.Authorization = `Bearer ${s.token}`;
-
   const res = await fetch(url, { ...opts, headers });
   const ct = res.headers.get("content-type") || "";
   const body = ct.includes("application/json") ? await res.json() : await res.text();
-
-  if(!res.ok){
-    throw new Error(body?.error || body?.message || (typeof body === "string" ? body : "Erro"));
-  }
+  if(!res.ok) throw new Error(body?.error || body?.message || (typeof body==="string"?body:"Erro"));
   return body;
 }
 
@@ -44,36 +40,40 @@ async function initIndex(){
   const selBarber = $("selBarber");
   const selType = $("selType");
   const selDate = $("selDate");
+  const selService = $("selService"); // <<< NOVO
   const btnLoadSlots = $("btnLoadSlots");
   const slotsWrap = $("slotsWrap");
 
   function showLogin(){
     viewLogin.classList.remove("hidden");
     viewBooking.classList.add("hidden");
-    if(btnGoAdmin) btnGoAdmin.classList.add("hidden");
-    if(btnLogoutClient) btnLogoutClient.classList.add("hidden");
-    if(badgeUser) badgeUser.textContent = "";
+    btnGoAdmin?.classList.add("hidden");
+    btnLogoutClient?.classList.add("hidden");
+    if(badgeUser) badgeUser.textContent="";
   }
-
   function showBooking(){
     viewLogin.classList.add("hidden");
     viewBooking.classList.remove("hidden");
-    if(btnLogoutClient) btnLogoutClient.classList.remove("hidden");
+    btnLogoutClient?.classList.remove("hidden");
 
     const s = getSession();
     if(badgeUser) badgeUser.textContent = `${s?.user?.name || "Usuário"} • ${s?.user?.role || ""}`;
-
-    if(s?.user?.role === "admin"){
-      if(btnGoAdmin) btnGoAdmin.classList.remove("hidden");
-    }else{
-      if(btnGoAdmin) btnGoAdmin.classList.add("hidden");
-    }
+    if(s?.user?.role === "admin") btnGoAdmin?.classList.remove("hidden");
+    else btnGoAdmin?.classList.add("hidden");
   }
 
   async function loadBarbers(){
     const rows = await api("/api/barbers");
     selBarber.innerHTML = `<option value="">Selecione...</option>` +
       rows.map(b => `<option value="${b.id}">${b.name}</option>`).join("");
+  }
+
+  async function loadServices(){
+    const rows = await api("/api/services");
+    if(!selService) return;
+    selService.innerHTML =
+      `<option value="">Selecione...</option>` +
+      rows.map(s => `<option value="${s.id}">${s.name} • ${s.duration_minutes} min</option>`).join("");
   }
 
   async function loadSlots(){
@@ -101,7 +101,18 @@ async function initIndex(){
         try{
           const slot_id = Number(btn.dataset.id);
           const type = String(selType.value||"AVULSO").toUpperCase();
-          await api("/api/book",{method:"POST", body:JSON.stringify({slot_id,type})});
+          const service_id = Number(selService?.value);
+
+          if(!service_id) {
+            alert("Selecione o serviço (ex: Barba 30min, Cabelo 30min etc.)");
+            return;
+          }
+
+          await api("/api/book",{
+            method:"POST",
+            body:JSON.stringify({slot_id,type,service_id})
+          });
+
           alert("Agendado com sucesso!");
           await loadSlots();
         }catch(e){
@@ -111,11 +122,13 @@ async function initIndex(){
     });
   }
 
-  // Boot index
   const sess = getSession();
   if(sess?.token){
     showBooking();
-    try{ await loadBarbers(); }catch{}
+    try{
+      await loadBarbers();
+      await loadServices();
+    }catch{}
   }else{
     showLogin();
   }
@@ -135,9 +148,9 @@ async function initIndex(){
       const data = await api("/api/login",{method:"POST", body:JSON.stringify({email,password})});
       setSession({token:data.token, user:data.user});
 
-      // ADMIN pode ficar no agendamento também (sem loop)
       showBooking();
       await loadBarbers();
+      await loadServices();
     }catch(e){
       setMsg(loginMsg, e.message || "Erro no login");
     }
@@ -151,14 +164,8 @@ async function initAdmin(){
   if(!location.pathname.includes("admin.html")) return;
 
   const sess = getSession();
-  if(!sess?.token){
-    location.href = "/";
-    return;
-  }
-  if(sess.user?.role !== "admin"){
-    location.href = "/";
-    return;
-  }
+  if(!sess?.token){ location.href = "/"; return; }
+  if(sess.user?.role !== "admin"){ location.href = "/"; return; }
 
   $("userBadge").textContent = `${sess.user?.name || "Admin"} • admin`;
 
@@ -284,7 +291,8 @@ async function initAdmin(){
         const tag = r.status==="FREE" ? "LIVRE" : r.status==="BLOCKED" ? "BLOQUEADO" : "MARCADO";
         const client = r.client_name ? ` • ${r.client_name}` : "";
         const type = r.type ? ` • ${r.type}` : "";
-        return `<div class="slot"><div><b>${r.time}</b> <span class="muted">(${tag}${client}${type})</span></div></div>`;
+        const service = r.service_name ? ` • Serviço: ${r.service_name} (${r.service_minutes}min)` : "";
+        return `<div class="slot"><div><b>${r.time}</b> <span class="muted">(${tag}${client}${type}${service})</span></div></div>`;
       }).join("");
     }catch(e){
       setMsg($("adminMsg3"), e.message || "Erro ao carregar");
