@@ -1,6 +1,7 @@
 const express = require("express");
 const cors = require("cors");
 const path = require("path");
+const fs = require("fs");
 const sqlite3 = require("sqlite3").verbose();
 const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
@@ -12,384 +13,214 @@ app.use(cors());
 app.use(express.json());
 app.use(express.static(path.join(__dirname, "public")));
 
+/* ======================================================
+   BANCO DE DADOS (SOLUÇÃO PARA RENDER FREE)
+   ====================================================== */
+
+// Em produção (Render Free) usamos /tmp
+// Em local, usamos a pasta do projeto
 const isRender = !!process.env.RENDER;
-const dbPath = isRender ? "/var/data/barbearia.db" : path.join(__dirname, "barbearia.db");
-const db = new sqlite3.Database(dbPath);
+const dataDir = isRender ? "/tmp" : __dirname;
 
-const JWT_SECRET = process.env.JWT_SECRET || "JWT_DEV_SECRET_TROQUE_ISSO";
+// Garante que o diretório existe
+try {
+  fs.mkdirSync(dataDir, { recursive: true });
+} catch (e) {
+  console.error("Erro ao criar diretório do banco:", e.message);
+}
 
-function run(sql, params = []) {
-  return new Promise((resolve, reject) => {
+// Caminho FINAL do banco
+const dbPath = path.join(dataDir, "barbearia.db");
+const db = new sqlite3.Database(dbPath, (err) => {
+  if (err) {
+    console.error("Erro ao abrir SQLite:", err.message);
+  } else {
+    console.log("SQLite conectado em:", dbPath);
+  }
+});
+
+/* ======================================================
+   CONFIG
+   ====================================================== */
+
+const JWT_SECRET = process.env.JWT_SECRET || "DEV_SECRET";
+
+/* ======================================================
+   HELPERS SQLITE
+   ====================================================== */
+
+const run = (sql, params = []) =>
+  new Promise((resolve, reject) => {
     db.run(sql, params, function (err) {
-      if (err) return reject(err);
-      resolve({ lastID: this.lastID, changes: this.changes });
+      if (err) reject(err);
+      else resolve(this);
     });
   });
-}
 
-function get(sql, params = []) {
-  return new Promise((resolve, reject) => {
+const get = (sql, params = []) =>
+  new Promise((resolve, reject) => {
     db.get(sql, params, (err, row) => {
-      if (err) return reject(err);
-      resolve(row);
+      if (err) reject(err);
+      else resolve(row);
     });
   });
-}
 
-function all(sql, params = []) {
-  return new Promise((resolve, reject) => {
+const all = (sql, params = []) =>
+  new Promise((resolve, reject) => {
     db.all(sql, params, (err, rows) => {
-      if (err) return reject(err);
-      resolve(rows);
+      if (err) reject(err);
+      else resolve(rows);
     });
   });
-}
 
-async function initDb() {
+/* ======================================================
+   INIT DB
+   ====================================================== */
+
+async function initDB() {
   await run(`
     CREATE TABLE IF NOT EXISTS users (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
-      name TEXT NOT NULL,
-      phone TEXT,
-      email TEXT NOT NULL UNIQUE,
-      password_hash TEXT NOT NULL,
-      role TEXT NOT NULL CHECK(role IN ('admin','client')),
-      active INTEGER NOT NULL DEFAULT 1,
-      created_at TEXT DEFAULT CURRENT_TIMESTAMP
+      name TEXT,
+      email TEXT UNIQUE,
+      password TEXT,
+      role TEXT
     )
   `);
 
   await run(`
     CREATE TABLE IF NOT EXISTS barbers (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
-      name TEXT NOT NULL,
-      active INTEGER NOT NULL DEFAULT 1,
-      created_at TEXT DEFAULT CURRENT_TIMESTAMP
+      name TEXT
     )
   `);
 
   await run(`
     CREATE TABLE IF NOT EXISTS slots (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
-      barber_id INTEGER NOT NULL,
-      date TEXT NOT NULL,         -- YYYY-MM-DD
-      time TEXT NOT NULL,         -- HH:MM
-      status TEXT NOT NULL CHECK(status IN ('FREE','BOOKED','BLOCKED')) DEFAULT 'FREE',
+      barber_id INTEGER,
+      date TEXT,
+      time TEXT,
+      status TEXT,
       client_id INTEGER,
-      appointment_type TEXT CHECK(appointment_type IN ('ASSINATURA','AVULSO')),
-      created_at TEXT DEFAULT CURRENT_TIMESTAMP,
-      FOREIGN KEY(barber_id) REFERENCES barbers(id),
-      FOREIGN KEY(client_id) REFERENCES users(id),
-      UNIQUE(barber_id, date, time)
+      type TEXT
     )
   `);
 
-  // Seed admin padrão (homologação) se não existir nenhum admin
-  const adminCount = await get(`SELECT COUNT(*) as c FROM users WHERE role='admin'`);
-  if (!adminCount || adminCount.c === 0) {
+  // Admin seed
+  const admin = await get(
+    "SELECT * FROM users WHERE email = ?",
+    ["admin@teste.com"]
+  );
+
+  if (!admin) {
     const hash = await bcrypt.hash("123456", 10);
     await run(
-      `INSERT INTO users (name, phone, email, password_hash, role, active)
-       VALUES (?, ?, ?, ?, 'admin', 1)`,
-      ["Admin", "", "admin@teste.com", hash]
+      "INSERT INTO users (name,email,password,role) VALUES (?,?,?,?)",
+      ["Admin", "admin@teste.com", hash, "admin"]
     );
-    console.log("Admin seed criado: admin@teste.com / 123456");
+    console.log("Admin criado: admin@teste.com / 123456");
   }
 
-  // Seed de barbeiros (opcional)
-  const barberCount = await get(`SELECT COUNT(*) as c FROM barbers`);
-  if (!barberCount || barberCount.c === 0) {
-    await run(`INSERT INTO barbers (name, active) VALUES (?,1)`, ["João Victor"]);
-    await run(`INSERT INTO barbers (name, active) VALUES (?,1)`, ["Renan Lopes"]);
-    console.log("Barbeiros seed criados.");
+  // Barbeiros seed
+  const count = await get("SELECT COUNT(*) as c FROM barbers");
+  if (count.c === 0) {
+    await run("INSERT INTO barbers (name) VALUES (?)", ["João Victor"]);
+    await run("INSERT INTO barbers (name) VALUES (?)", ["Renan Lopes"]);
+    console.log("Barbeiros criados");
   }
 }
 
-function signToken(user) {
-  return jwt.sign(
-    { id: user.id, role: user.role, name: user.name, email: user.email },
-    JWT_SECRET,
-    { expiresIn: "7d" }
-  );
-}
+/* ======================================================
+   AUTH
+   ====================================================== */
 
 function auth(req, res, next) {
-  const header = req.headers.authorization || "";
-  const token = header.startsWith("Bearer ") ? header.slice(7) : null;
+  const token = req.headers.authorization?.split(" ")[1];
   if (!token) return res.status(401).json({ error: "Sem token" });
 
   try {
-    const payload = jwt.verify(token, JWT_SECRET);
-    req.user = payload;
+    req.user = jwt.verify(token, JWT_SECRET);
     next();
-  } catch (e) {
-    return res.status(401).json({ error: "Token inválido/expirado" });
+  } catch {
+    res.status(401).json({ error: "Token inválido" });
   }
 }
 
-function isAdmin(req, res, next) {
-  if (req.user?.role !== "admin") return res.status(403).json({ error: "Acesso negado (admin)" });
+function admin(req, res, next) {
+  if (req.user.role !== "admin")
+    return res.status(403).json({ error: "Acesso negado" });
   next();
 }
 
+/* ======================================================
+   ROTAS
+   ====================================================== */
+
 // Health
 app.get("/api/health", (req, res) => {
-  res.json({ ok: true, dbPath, render: isRender });
+  res.json({ ok: true, db: dbPath });
 });
 
 // Login
 app.post("/api/login", async (req, res) => {
-  try {
-    const { email, password } = req.body || {};
-    if (!email || !password) return res.status(400).json({ error: "Email e senha obrigatórios" });
+  const { email, password } = req.body;
+  const user = await get("SELECT * FROM users WHERE email = ?", [email]);
+  if (!user) return res.status(401).json({ error: "Login inválido" });
 
-    const user = await get(`SELECT * FROM users WHERE email = ? AND active = 1`, [email.trim().toLowerCase()]);
-    if (!user) return res.status(401).json({ error: "Usuário ou senha inválidos" });
+  const ok = await bcrypt.compare(password, user.password);
+  if (!ok) return res.status(401).json({ error: "Login inválido" });
 
-    const ok = await bcrypt.compare(password, user.password_hash);
-    if (!ok) return res.status(401).json({ error: "Usuário ou senha inválidos" });
+  const token = jwt.sign(
+    { id: user.id, role: user.role, name: user.name },
+    JWT_SECRET
+  );
 
-    const token = signToken(user);
-    res.json({
-      token,
-      user: { id: user.id, name: user.name, email: user.email, role: user.role }
-    });
-  } catch (e) {
-    res.status(500).json({ error: "Erro no login", details: String(e.message || e) });
-  }
+  res.json({ token, user: { name: user.name, role: user.role } });
 });
 
-// Listar barbeiros (cliente)
+// Barbeiros
 app.get("/api/barbers", auth, async (req, res) => {
-  try {
-    const rows = await all(`SELECT id, name FROM barbers WHERE active = 1 ORDER BY name`);
-    res.json(rows);
-  } catch (e) {
-    res.status(500).json({ error: "Erro ao listar barbeiros" });
-  }
+  res.json(await all("SELECT * FROM barbers"));
 });
 
-// Listar dias disponíveis para um barbeiro (opcional)
-app.get("/api/available-dates", auth, async (req, res) => {
-  try {
-    const barberId = Number(req.query.barber_id);
-    if (!barberId) return res.status(400).json({ error: "barber_id obrigatório" });
-
-    const rows = await all(
-      `SELECT date, COUNT(*) as free_count
-       FROM slots
-       WHERE barber_id = ? AND status = 'FREE'
-       GROUP BY date
-       ORDER BY date`,
-      [barberId]
-    );
-    res.json(rows);
-  } catch (e) {
-    res.status(500).json({ error: "Erro ao listar datas" });
-  }
-});
-
-// Listar horários livres por barbeiro e data
+// Slots livres
 app.get("/api/slots", auth, async (req, res) => {
-  try {
-    const barberId = Number(req.query.barber_id);
-    const date = String(req.query.date || "");
-    if (!barberId || !date) return res.status(400).json({ error: "barber_id e date obrigatórios" });
-
-    const rows = await all(
-      `SELECT id, date, time
-       FROM slots
-       WHERE barber_id = ? AND date = ? AND status = 'FREE'
-       ORDER BY time`,
-      [barberId, date]
-    );
-
-    res.json(rows);
-  } catch (e) {
-    res.status(500).json({ error: "Erro ao listar horários" });
-  }
+  const { barber_id, date } = req.query;
+  res.json(
+    await all(
+      "SELECT * FROM slots WHERE barber_id=? AND date=? AND status='FREE'",
+      [barber_id, date]
+    )
+  );
 });
 
-// Marcar um horário
+// Marcar
 app.post("/api/book", auth, async (req, res) => {
-  try {
-    const { slot_id, appointment_type } = req.body || {};
-    const slotId = Number(slot_id);
-    const type = appointment_type === "ASSINATURA" ? "ASSINATURA" : "AVULSO";
-
-    if (!slotId) return res.status(400).json({ error: "slot_id obrigatório" });
-
-    const slot = await get(`SELECT * FROM slots WHERE id = ?`, [slotId]);
-    if (!slot) return res.status(404).json({ error: "Horário não encontrado" });
-    if (slot.status !== "FREE") return res.status(409).json({ error: "Horário indisponível" });
-
-    await run(
-      `UPDATE slots
-       SET status='BOOKED', client_id=?, appointment_type=?
-       WHERE id=? AND status='FREE'`,
-      [req.user.id, type, slotId]
-    );
-
-    res.json({ ok: true });
-  } catch (e) {
-    res.status(500).json({ error: "Erro ao marcar", details: String(e.message || e) });
-  }
+  const { slot_id, type } = req.body;
+  await run(
+    "UPDATE slots SET status='BOOKED', client_id=?, type=? WHERE id=?",
+    [req.user.id, type, slot_id]
+  );
+  res.json({ ok: true });
 });
 
-// ======================
-// ADMIN
-// ======================
-
-// Criar usuário (cliente/admin)
-app.post("/api/admin/users", auth, isAdmin, async (req, res) => {
-  try {
-    const { name, phone, email, password, role } = req.body || {};
-    if (!name || !email || !password) return res.status(400).json({ error: "name, email, password obrigatórios" });
-
-    const r = role === "admin" ? "admin" : "client";
-    const hash = await bcrypt.hash(password, 10);
-
-    await run(
-      `INSERT INTO users (name, phone, email, password_hash, role, active)
-       VALUES (?, ?, ?, ?, ?, 1)`,
-      [name, phone || "", email.trim().toLowerCase(), hash, r]
-    );
-
-    res.json({ ok: true });
-  } catch (e) {
-    const msg = String(e.message || e);
-    if (msg.includes("UNIQUE")) return res.status(409).json({ error: "Email já existe" });
-    res.status(500).json({ error: "Erro ao criar usuário", details: msg });
-  }
+// ADMIN — criar slot
+app.post("/api/admin/slots", auth, admin, async (req, res) => {
+  const { barber_id, date, time } = req.body;
+  await run(
+    "INSERT INTO slots (barber_id,date,time,status) VALUES (?,?,?,'FREE')",
+    [barber_id, date, time]
+  );
+  res.json({ ok: true });
 });
 
-// Listar usuários (admin)
-app.get("/api/admin/users", auth, isAdmin, async (req, res) => {
-  try {
-    const rows = await all(`SELECT id, name, email, role, active, created_at FROM users ORDER BY created_at DESC`);
-    res.json(rows);
-  } catch (e) {
-    res.status(500).json({ error: "Erro ao listar usuários" });
-  }
-});
+/* ======================================================
+   START
+   ====================================================== */
 
-// Criar barbeiro
-app.post("/api/admin/barbers", auth, isAdmin, async (req, res) => {
-  try {
-    const { name } = req.body || {};
-    if (!name) return res.status(400).json({ error: "name obrigatório" });
-
-    await run(`INSERT INTO barbers (name, active) VALUES (?, 1)`, [name]);
-    res.json({ ok: true });
-  } catch (e) {
-    res.status(500).json({ error: "Erro ao criar barbeiro" });
-  }
-});
-
-// Listar barbeiros (admin também)
-app.get("/api/admin/barbers", auth, isAdmin, async (req, res) => {
-  try {
-    const rows = await all(`SELECT id, name, active FROM barbers ORDER BY name`);
-    res.json(rows);
-  } catch (e) {
-    res.status(500).json({ error: "Erro ao listar barbeiros" });
-  }
-});
-
-// Criar slot (horário livre)
-app.post("/api/admin/slots", auth, isAdmin, async (req, res) => {
-  try {
-    const { barber_id, date, time } = req.body || {};
-    const barberId = Number(barber_id);
-
-    if (!barberId || !date || !time) {
-      return res.status(400).json({ error: "barber_id, date(YYYY-MM-DD), time(HH:MM) obrigatórios" });
-    }
-
-    await run(
-      `INSERT INTO slots (barber_id, date, time, status)
-       VALUES (?, ?, ?, 'FREE')`,
-      [barberId, date, time]
-    );
-
-    res.json({ ok: true });
-  } catch (e) {
-    const msg = String(e.message || e);
-    if (msg.includes("UNIQUE")) return res.status(409).json({ error: "Esse horário já existe para esse barbeiro" });
-    res.status(500).json({ error: "Erro ao criar horário", details: msg });
-  }
-});
-
-// Bloquear slot
-app.post("/api/admin/slots/:id/block", auth, isAdmin, async (req, res) => {
-  try {
-    const slotId = Number(req.params.id);
-    if (!slotId) return res.status(400).json({ error: "id inválido" });
-
-    const slot = await get(`SELECT * FROM slots WHERE id=?`, [slotId]);
-    if (!slot) return res.status(404).json({ error: "Horário não encontrado" });
-    if (slot.status === "BOOKED") return res.status(409).json({ error: "Não pode bloquear um horário já marcado" });
-
-    await run(`UPDATE slots SET status='BLOCKED', client_id=NULL, appointment_type=NULL WHERE id=?`, [slotId]);
-    res.json({ ok: true });
-  } catch (e) {
-    res.status(500).json({ error: "Erro ao bloquear" });
-  }
-});
-
-// Listar slots por barbeiro/data (admin: ver tudo)
-app.get("/api/admin/slots", auth, isAdmin, async (req, res) => {
-  try {
-    const barberId = Number(req.query.barber_id);
-    const date = String(req.query.date || "");
-    if (!barberId || !date) return res.status(400).json({ error: "barber_id e date obrigatórios" });
-
-    const rows = await all(
-      `SELECT s.id, s.date, s.time, s.status,
-              u.name as client_name, s.appointment_type
-       FROM slots s
-       LEFT JOIN users u ON u.id = s.client_id
-       WHERE s.barber_id = ? AND s.date = ?
-       ORDER BY s.time`,
-      [barberId, date]
-    );
-
-    res.json(rows);
-  } catch (e) {
-    res.status(500).json({ error: "Erro ao listar slots" });
-  }
-});
-
-// Listar agendamentos marcados
-app.get("/api/admin/bookings", auth, isAdmin, async (req, res) => {
-  try {
-    const rows = await all(
-      `SELECT s.id, s.date, s.time, s.appointment_type,
-              b.name as barber_name,
-              u.name as client_name, u.email as client_email
-       FROM slots s
-       JOIN barbers b ON b.id = s.barber_id
-       LEFT JOIN users u ON u.id = s.client_id
-       WHERE s.status='BOOKED'
-       ORDER BY s.date DESC, s.time DESC`
-    );
-    res.json(rows);
-  } catch (e) {
-    res.status(500).json({ error: "Erro ao listar agendamentos" });
-  }
-});
-
-// Página default
-app.get("/", (req, res) => {
-  res.sendFile(path.join(__dirname, "public", "index.html"));
-});
-
-// Start
-initDb()
-  .then(() => {
-    app.listen(PORT, () => console.log("Servidor rodando na porta", PORT, "| DB:", dbPath));
-  })
-  .catch((e) => {
-    console.error("Falha ao iniciar DB:", e);
-    process.exit(1);
+initDB().then(() => {
+  app.listen(PORT, () => {
+    console.log("Servidor rodando na porta", PORT);
   });
+});
