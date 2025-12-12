@@ -6,6 +6,8 @@ const sqlite3 = require("sqlite3").verbose();
 const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
 
+console.log(">>> VERSAO SERVER: 2025-12-12 v5 FULL");
+
 const app = express();
 const PORT = process.env.PORT || 3000;
 
@@ -13,214 +15,307 @@ app.use(cors());
 app.use(express.json());
 app.use(express.static(path.join(__dirname, "public")));
 
-/* ======================================================
-   BANCO DE DADOS (SOLUÇÃO PARA RENDER FREE)
-   ====================================================== */
+const JWT_SECRET = process.env.JWT_SECRET || "DEV_SECRET";
 
-// Em produção (Render Free) usamos /tmp
-// Em local, usamos a pasta do projeto
+// Render Free: /tmp (gravável). Local: __dirname
 const isRender = !!process.env.RENDER;
 const dataDir = isRender ? "/tmp" : __dirname;
 
-// Garante que o diretório existe
 try {
   fs.mkdirSync(dataDir, { recursive: true });
 } catch (e) {
-  console.error("Erro ao criar diretório do banco:", e.message);
+  console.error("Falha criando dataDir:", dataDir, e?.message);
 }
 
-// Caminho FINAL do banco
 const dbPath = path.join(dataDir, "barbearia.db");
-const db = new sqlite3.Database(dbPath, (err) => {
-  if (err) {
-    console.error("Erro ao abrir SQLite:", err.message);
-  } else {
-    console.log("SQLite conectado em:", dbPath);
+console.log(">>> DB PATH =", dbPath);
+
+const db = new sqlite3.Database(
+  dbPath,
+  sqlite3.OPEN_READWRITE | sqlite3.OPEN_CREATE,
+  (err) => {
+    if (err) {
+      console.error("❌ ERRO AO ABRIR SQLITE:", err.message);
+      process.exit(1);
+    }
+    console.log("✅ SQLITE OK:", dbPath);
   }
-});
+);
 
-/* ======================================================
-   CONFIG
-   ====================================================== */
-
-const JWT_SECRET = process.env.JWT_SECRET || "DEV_SECRET";
-
-/* ======================================================
-   HELPERS SQLITE
-   ====================================================== */
-
-const run = (sql, params = []) =>
-  new Promise((resolve, reject) => {
+// ===== Helpers =====
+function run(sql, params = []) {
+  return new Promise((resolve, reject) => {
     db.run(sql, params, function (err) {
       if (err) reject(err);
       else resolve(this);
     });
   });
-
-const get = (sql, params = []) =>
-  new Promise((resolve, reject) => {
-    db.get(sql, params, (err, row) => {
-      if (err) reject(err);
-      else resolve(row);
-    });
+}
+function get(sql, params = []) {
+  return new Promise((resolve, reject) => {
+    db.get(sql, params, (err, row) => (err ? reject(err) : resolve(row)));
   });
-
-const all = (sql, params = []) =>
-  new Promise((resolve, reject) => {
-    db.all(sql, params, (err, rows) => {
-      if (err) reject(err);
-      else resolve(rows);
-    });
+}
+function all(sql, params = []) {
+  return new Promise((resolve, reject) => {
+    db.all(sql, params, (err, rows) => (err ? reject(err) : resolve(rows)));
   });
+}
 
-/* ======================================================
-   INIT DB
-   ====================================================== */
+// ===== Auth =====
+function auth(req, res, next) {
+  const token = req.headers.authorization?.split(" ")[1];
+  if (!token) return res.status(401).json({ error: "Sem token" });
+  try {
+    req.user = jwt.verify(token, JWT_SECRET);
+    next();
+  } catch {
+    return res.status(401).json({ error: "Token inválido" });
+  }
+}
+function adminOnly(req, res, next) {
+  if (req.user.role !== "admin") {
+    return res.status(403).json({ error: "Acesso negado" });
+  }
+  next();
+}
 
+// ===== Init DB =====
 async function initDB() {
   await run(`
     CREATE TABLE IF NOT EXISTS users (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       name TEXT,
+      phone TEXT,
       email TEXT UNIQUE,
       password TEXT,
-      role TEXT
+      role TEXT,
+      active INTEGER DEFAULT 1,
+      created_at TEXT DEFAULT CURRENT_TIMESTAMP
     )
   `);
 
   await run(`
     CREATE TABLE IF NOT EXISTS barbers (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
-      name TEXT
+      name TEXT NOT NULL,
+      active INTEGER DEFAULT 1,
+      created_at TEXT DEFAULT CURRENT_TIMESTAMP
     )
   `);
 
   await run(`
     CREATE TABLE IF NOT EXISTS slots (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
-      barber_id INTEGER,
-      date TEXT,
-      time TEXT,
-      status TEXT,
+      barber_id INTEGER NOT NULL,
+      date TEXT NOT NULL,      -- YYYY-MM-DD
+      time TEXT NOT NULL,      -- HH:MM
+      status TEXT NOT NULL,    -- FREE | BOOKED | BLOCKED
       client_id INTEGER,
-      type TEXT
+      type TEXT,               -- AVULSO | ASSINATURA
+      created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+      UNIQUE(barber_id, date, time)
     )
   `);
 
-  // Admin seed
-  const admin = await get(
-    "SELECT * FROM users WHERE email = ?",
-    ["admin@teste.com"]
-  );
-
+  // Admin seed (somente 1 admin padrão)
+  const admin = await get("SELECT * FROM users WHERE email = ?", ["admin@teste.com"]);
   if (!admin) {
     const hash = await bcrypt.hash("123456", 10);
     await run(
-      "INSERT INTO users (name,email,password,role) VALUES (?,?,?,?)",
-      ["Admin", "admin@teste.com", hash, "admin"]
+      "INSERT INTO users (name,phone,email,password,role,active) VALUES (?,?,?,?,?,1)",
+      ["Admin", "", "admin@teste.com", hash, "admin"]
     );
-    console.log("Admin criado: admin@teste.com / 123456");
+    console.log("✅ Admin seed: admin@teste.com / 123456");
   }
 
-  // Barbeiros seed
-  const count = await get("SELECT COUNT(*) as c FROM barbers");
-  if (count.c === 0) {
-    await run("INSERT INTO barbers (name) VALUES (?)", ["João Victor"]);
-    await run("INSERT INTO barbers (name) VALUES (?)", ["Renan Lopes"]);
-    console.log("Barbeiros criados");
-  }
+  // ❌ NÃO cria barbeiros automaticamente (SEM SEED)
 }
 
-/* ======================================================
-   AUTH
-   ====================================================== */
+// ===== Rotas =====
+app.get("/api/health", (req, res) => res.json({ ok: true, db: dbPath }));
 
-function auth(req, res, next) {
-  const token = req.headers.authorization?.split(" ")[1];
-  if (!token) return res.status(401).json({ error: "Sem token" });
-
-  try {
-    req.user = jwt.verify(token, JWT_SECRET);
-    next();
-  } catch {
-    res.status(401).json({ error: "Token inválido" });
-  }
-}
-
-function admin(req, res, next) {
-  if (req.user.role !== "admin")
-    return res.status(403).json({ error: "Acesso negado" });
-  next();
-}
-
-/* ======================================================
-   ROTAS
-   ====================================================== */
-
-// Health
-app.get("/api/health", (req, res) => {
-  res.json({ ok: true, db: dbPath });
-});
-
-// Login
 app.post("/api/login", async (req, res) => {
-  const { email, password } = req.body;
-  const user = await get("SELECT * FROM users WHERE email = ?", [email]);
+  const email = String(req.body?.email || "").trim().toLowerCase();
+  const password = String(req.body?.password || "");
+
+  const user = await get("SELECT * FROM users WHERE email = ? AND active=1", [email]);
   if (!user) return res.status(401).json({ error: "Login inválido" });
 
   const ok = await bcrypt.compare(password, user.password);
   if (!ok) return res.status(401).json({ error: "Login inválido" });
 
-  const token = jwt.sign(
-    { id: user.id, role: user.role, name: user.name },
-    JWT_SECRET
-  );
-
-  res.json({ token, user: { name: user.name, role: user.role } });
+  const token = jwt.sign({ id: user.id, role: user.role, name: user.name }, JWT_SECRET);
+  res.json({ token, user: { id: user.id, name: user.name, role: user.role } });
 });
 
-// Barbeiros
+// ===== Barbeiros (cliente/admin) =====
 app.get("/api/barbers", auth, async (req, res) => {
-  res.json(await all("SELECT * FROM barbers"));
+  const rows = await all("SELECT id,name,active,created_at FROM barbers WHERE active=1 ORDER BY name");
+  res.json(rows);
 });
 
-// Slots livres
+// ===== Slots livres (cliente) =====
 app.get("/api/slots", auth, async (req, res) => {
-  const { barber_id, date } = req.query;
-  res.json(
-    await all(
-      "SELECT * FROM slots WHERE barber_id=? AND date=? AND status='FREE'",
-      [barber_id, date]
-    )
+  const barberId = Number(req.query?.barber_id);
+  const date = String(req.query?.date || "");
+
+  if (!barberId || !date) return res.status(400).json({ error: "barber_id e date são obrigatórios" });
+
+  const rows = await all(
+    "SELECT id,barber_id,date,time,status FROM slots WHERE barber_id=? AND date=? AND status='FREE' ORDER BY time",
+    [barberId, date]
   );
+  res.json(rows);
 });
 
-// Marcar
+// ===== Agendamentos do usuário (cliente) =====
+app.get("/api/mybookings", auth, async (req, res) => {
+  const rows = await all(
+    `
+    SELECT s.id, s.barber_id, b.name as barber_name, s.date, s.time, s.status, s.type
+    FROM slots s
+    JOIN barbers b ON b.id = s.barber_id
+    WHERE s.client_id = ? AND s.status='BOOKED'
+    ORDER BY s.date DESC, s.time DESC
+    `,
+    [req.user.id]
+  );
+  res.json(rows);
+});
+
+// ===== Marcar (cliente) =====
 app.post("/api/book", auth, async (req, res) => {
-  const { slot_id, type } = req.body;
+  const slotId = Number(req.body?.slot_id);
+  const type = String(req.body?.type || "AVULSO").toUpperCase();
+
+  if (!slotId) return res.status(400).json({ error: "slot_id é obrigatório" });
+  if (type !== "AVULSO" && type !== "ASSINATURA") return res.status(400).json({ error: "type inválido" });
+
+  const slot = await get("SELECT * FROM slots WHERE id=?", [slotId]);
+  if (!slot) return res.status(404).json({ error: "Horário não encontrado" });
+  if (slot.status !== "FREE") return res.status(409).json({ error: "Este horário não está livre" });
+
   await run(
-    "UPDATE slots SET status='BOOKED', client_id=?, type=? WHERE id=?",
-    [req.user.id, type, slot_id]
+    "UPDATE slots SET status='BOOKED', client_id=?, type=? WHERE id=? AND status='FREE'",
+    [req.user.id, type, slotId]
   );
+
   res.json({ ok: true });
 });
 
-// ADMIN — criar slot
-app.post("/api/admin/slots", auth, admin, async (req, res) => {
-  const { barber_id, date, time } = req.body;
+// ===================== ADMIN =====================
+
+// criar usuário
+app.post("/api/admin/users", auth, adminOnly, async (req, res) => {
+  const name = String(req.body?.name || "").trim();
+  const phone = String(req.body?.phone || "").trim();
+  const email = String(req.body?.email || "").trim().toLowerCase();
+  const password = String(req.body?.password || "");
+  const role = String(req.body?.role || "client").trim();
+
+  if (!name || !email || !password) return res.status(400).json({ error: "Nome, email e senha são obrigatórios" });
+  if (role !== "client" && role !== "admin") return res.status(400).json({ error: "role inválido" });
+
+  const exists = await get("SELECT id FROM users WHERE email=?", [email]);
+  if (exists) return res.status(409).json({ error: "Email já cadastrado" });
+
+  const hash = await bcrypt.hash(password, 10);
   await run(
-    "INSERT INTO slots (barber_id,date,time,status) VALUES (?,?,?,'FREE')",
-    [barber_id, date, time]
+    "INSERT INTO users (name,phone,email,password,role,active) VALUES (?,?,?,?,?,1)",
+    [name, phone, email, hash, role]
   );
+
   res.json({ ok: true });
 });
 
-/* ======================================================
-   START
-   ====================================================== */
+// listar usuários
+app.get("/api/admin/users", auth, adminOnly, async (req, res) => {
+  const rows = await all(
+    "SELECT id,name,phone,email,role,active,created_at FROM users ORDER BY created_at DESC"
+  );
+  res.json(rows);
+});
+
+// criar barbeiro
+app.post("/api/admin/barbers", auth, adminOnly, async (req, res) => {
+  const name = String(req.body?.name || "").trim();
+  if (!name) return res.status(400).json({ error: "Nome do barbeiro é obrigatório" });
+
+  await run("INSERT INTO barbers (name,active) VALUES (?,1)", [name]);
+  res.json({ ok: true });
+});
+
+// listar barbeiros (admin)
+app.get("/api/admin/barbers", auth, adminOnly, async (req, res) => {
+  const rows = await all("SELECT id,name,active,created_at FROM barbers ORDER BY created_at DESC");
+  res.json(rows);
+});
+
+// criar slot LIVRE
+app.post("/api/admin/slots/free", auth, adminOnly, async (req, res) => {
+  const barberId = Number(req.body?.barber_id);
+  const date = String(req.body?.date || "");
+  const time = String(req.body?.time || "");
+
+  if (!barberId || !date || !time) return res.status(400).json({ error: "barber_id, date, time obrigatórios" });
+
+  try {
+    await run(
+      "INSERT INTO slots (barber_id,date,time,status) VALUES (?,?,?,'FREE')",
+      [barberId, date, time]
+    );
+    res.json({ ok: true });
+  } catch (e) {
+    // UNIQUE(barber_id,date,time) evita duplicar
+    res.status(409).json({ error: "Esse horário já existe" });
+  }
+});
+
+// criar slot BLOQUEADO
+app.post("/api/admin/slots/block", auth, adminOnly, async (req, res) => {
+  const barberId = Number(req.body?.barber_id);
+  const date = String(req.body?.date || "");
+  const time = String(req.body?.time || "");
+
+  if (!barberId || !date || !time) return res.status(400).json({ error: "barber_id, date, time obrigatórios" });
+
+  try {
+    await run(
+      "INSERT INTO slots (barber_id,date,time,status) VALUES (?,?,?,'BLOCKED')",
+      [barberId, date, time]
+    );
+    res.json({ ok: true });
+  } catch {
+    // se já existe, atualiza pra BLOCKED
+    await run(
+      "UPDATE slots SET status='BLOCKED', client_id=NULL, type=NULL WHERE barber_id=? AND date=? AND time=?",
+      [barberId, date, time]
+    );
+    res.json({ ok: true, updated: true });
+  }
+});
+
+// ver agenda do dia (admin)
+app.get("/api/admin/slots", auth, adminOnly, async (req, res) => {
+  const barberId = Number(req.query?.barber_id);
+  const date = String(req.query?.date || "");
+  if (!barberId || !date) return res.status(400).json({ error: "barber_id e date obrigatórios" });
+
+  const rows = await all(
+    `
+    SELECT s.id,s.barber_id,s.date,s.time,s.status,s.type,
+           u.name as client_name, u.email as client_email
+    FROM slots s
+    LEFT JOIN users u ON u.id = s.client_id
+    WHERE s.barber_id=? AND s.date=?
+    ORDER BY s.time
+    `,
+    [barberId, date]
+  );
+  res.json(rows);
+});
 
 initDB().then(() => {
-  app.listen(PORT, () => {
-    console.log("Servidor rodando na porta", PORT);
-  });
+  app.listen(PORT, () => console.log("✅ Servidor rodando na porta", PORT));
 });
