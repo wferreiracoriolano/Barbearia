@@ -1,91 +1,328 @@
-<!doctype html>
-<html lang="pt-br">
-<head>
-  <meta charset="utf-8"/>
-  <meta name="viewport" content="width=device-width,initial-scale=1"/>
-  <title>Admin - Barbearia</title>
-  <link rel="stylesheet" href="styles.css"/>
-</head>
-<body>
-  <div class="container">
-    <header class="top">
-      <h1>Admin</h1>
-      <div class="row">
-        <span id="userBadge" class="badge"></span>
-        <a class="btn btn-ghost" href="/">Ir para Agendamento</a>
-        <button id="btnLogout" class="btn btn-ghost">Sair</button>
+const KEYS = { session: "barb_session_v2" };
+const $ = (id) => document.getElementById(id);
+
+function setSession(data){ localStorage.setItem(KEYS.session, JSON.stringify(data)); }
+function getSession(){ try { return JSON.parse(localStorage.getItem(KEYS.session)); } catch { return null; } }
+function clearSession(){ localStorage.removeItem(KEYS.session); }
+
+function setMsg(el, msg, ok=false){
+  if(!el) return;
+  el.textContent = msg || "";
+  el.className = "msg " + (ok ? "ok" : "err");
+}
+
+async function api(url, opts={}){
+  const s = getSession();
+  const headers = Object.assign({ "Content-Type":"application/json" }, opts.headers||{});
+  if(s?.token) headers.Authorization = `Bearer ${s.token}`;
+
+  const res = await fetch(url, { ...opts, headers });
+  const ct = res.headers.get("content-type") || "";
+  const body = ct.includes("application/json") ? await res.json() : await res.text();
+
+  if(!res.ok){
+    throw new Error(body?.error || body?.message || (typeof body === "string" ? body : "Erro"));
+  }
+  return body;
+}
+
+/* ===================== INDEX (LOGIN + BOOKING) ===================== */
+async function initIndex(){
+  const viewLogin = $("viewLogin");
+  const viewBooking = $("viewBooking");
+  if(!viewLogin || !viewBooking) return;
+
+  const badgeUser = $("badgeUser");
+  const btnGoAdmin = $("btnGoAdmin");
+  const btnLogoutClient = $("btnLogoutClient");
+
+  const btnLogin = $("btnLogin");
+  const loginEmail = $("loginEmail");
+  const loginPass = $("loginPass");
+  const loginMsg = $("loginMsg");
+
+  const selBarber = $("selBarber");
+  const selType = $("selType");
+  const selDate = $("selDate");
+  const btnLoadSlots = $("btnLoadSlots");
+  const slotsWrap = $("slotsWrap");
+
+  function showLogin(){
+    viewLogin.classList.remove("hidden");
+    viewBooking.classList.add("hidden");
+    if(btnGoAdmin) btnGoAdmin.classList.add("hidden");
+    if(btnLogoutClient) btnLogoutClient.classList.add("hidden");
+    if(badgeUser) badgeUser.textContent = "";
+  }
+
+  function showBooking(){
+    viewLogin.classList.add("hidden");
+    viewBooking.classList.remove("hidden");
+    if(btnLogoutClient) btnLogoutClient.classList.remove("hidden");
+
+    const s = getSession();
+    if(badgeUser) badgeUser.textContent = `${s?.user?.name || "Usuário"} • ${s?.user?.role || ""}`;
+
+    if(s?.user?.role === "admin"){
+      if(btnGoAdmin) btnGoAdmin.classList.remove("hidden");
+    }else{
+      if(btnGoAdmin) btnGoAdmin.classList.add("hidden");
+    }
+  }
+
+  async function loadBarbers(){
+    const rows = await api("/api/barbers");
+    selBarber.innerHTML = `<option value="">Selecione...</option>` +
+      rows.map(b => `<option value="${b.id}">${b.name}</option>`).join("");
+  }
+
+  async function loadSlots(){
+    slotsWrap.innerHTML = "";
+    const barber_id = selBarber.value;
+    const date = selDate.value;
+    if(!barber_id || !date){
+      slotsWrap.innerHTML = `<div class="muted">Selecione barbeiro e data.</div>`;
+      return;
+    }
+    const rows = await api(`/api/slots?barber_id=${encodeURIComponent(barber_id)}&date=${encodeURIComponent(date)}`);
+    if(!rows.length){
+      slotsWrap.innerHTML = `<div class="muted">Nenhum horário livre nesse dia.</div>`;
+      return;
+    }
+    slotsWrap.innerHTML = rows.map(r => `
+      <div class="slot">
+        <div><b>${r.time}</b></div>
+        <button class="btn btn-sm" data-id="${r.id}">Marcar</button>
       </div>
-    </header>
+    `).join("");
 
-    <div class="tabs">
-      <button class="tab active" data-tab="tabAgenda">Agenda</button>
-      <button class="tab" data-tab="tabClientes">Clientes</button>
-      <button class="tab" data-tab="tabBarbeiros">Barbeiros</button>
-    </div>
+    slotsWrap.querySelectorAll("button[data-id]").forEach(btn=>{
+      btn.addEventListener("click", async ()=>{
+        try{
+          const slot_id = Number(btn.dataset.id);
+          const type = String(selType.value||"AVULSO").toUpperCase();
+          await api("/api/book",{method:"POST", body:JSON.stringify({slot_id,type})});
+          alert("Agendado com sucesso!");
+          await loadSlots();
+        }catch(e){
+          alert(e.message || "Erro ao agendar");
+        }
+      });
+    });
+  }
 
-    <section id="tabAgenda" class="card tabPane">
-      <h2>Agenda (por barbeiro)</h2>
-      <div class="grid">
-        <label>Barbeiro
-          <select id="admSelBarber"></select>
-        </label>
-        <label>Data
-          <input id="admDate" type="date"/>
-        </label>
-        <label>Hora (HH:MM)
-          <input id="admTime" placeholder="14:00"/>
-        </label>
-      </div>
+  // Boot index
+  const sess = getSession();
+  if(sess?.token){
+    showBooking();
+    try{ await loadBarbers(); }catch{}
+  }else{
+    showLogin();
+  }
 
-      <div class="row">
-        <button id="btnCreateSlot" class="btn">Criar horário LIVRE</button>
-        <button id="btnBlockSlot" class="btn btn-secondary">Bloquear horário</button>
-        <button id="btnLoadAdminSlots" class="btn btn-secondary">Carregar agenda do dia</button>
-      </div>
+  btnLogoutClient?.addEventListener("click", ()=>{
+    clearSession();
+    showLogin();
+  });
 
-      <div id="adminSlotsWrap" class="slots"></div>
-      <div id="adminMsg3" class="msg"></div>
-    </section>
+  btnLogin?.addEventListener("click", async ()=>{
+    setMsg(loginMsg,"");
+    try{
+      const email = (loginEmail.value||"").trim().toLowerCase();
+      const password = loginPass.value||"";
+      if(!email || !password) throw new Error("Preencha email e senha.");
 
-    <section id="tabClientes" class="card tabPane hidden">
-      <h2>Clientes cadastrados</h2>
-      <button id="btnLoadUsers" class="btn btn-secondary">Atualizar lista</button>
-      <div id="usersWrap" class="table"></div>
-      <div id="adminMsgUsers" class="msg"></div>
-    </section>
+      const data = await api("/api/login",{method:"POST", body:JSON.stringify({email,password})});
+      setSession({token:data.token, user:data.user});
 
-    <section id="tabBarbeiros" class="card tabPane hidden">
-      <h2>Barbeiros</h2>
+      // ADMIN pode ficar no agendamento também (sem loop)
+      showBooking();
+      await loadBarbers();
+    }catch(e){
+      setMsg(loginMsg, e.message || "Erro no login");
+    }
+  });
 
-      <div class="row">
-        <input id="bName" placeholder="Nome do barbeiro"/>
-        <button id="btnCreateBarber" class="btn">Criar</button>
-        <button id="btnLoadBarbers" class="btn btn-secondary">Atualizar lista</button>
-      </div>
+  btnLoadSlots?.addEventListener("click", ()=> loadSlots().catch(e=>alert(e.message)));
+}
 
-      <div id="barbersWrap" class="list"></div>
-      <div id="adminMsg2" class="msg"></div>
-    </section>
+/* ===================== ADMIN ===================== */
+async function initAdmin(){
+  if(!location.pathname.includes("admin.html")) return;
 
-    <section class="card">
-      <h2>Criar Usuário</h2>
-      <div class="grid">
-        <label>Nome <input id="uName"/></label>
-        <label>Telefone <input id="uPhone"/></label>
-        <label>Email <input id="uEmail" type="email"/></label>
-        <label>Senha <input id="uPass" type="password"/></label>
-        <label>Tipo
-          <select id="uRole">
-            <option value="client">cliente</option>
-            <option value="admin">admin</option>
-          </select>
-        </label>
-      </div>
-      <button id="btnCreateUser" class="btn">Criar usuário</button>
-      <div id="adminMsg1" class="msg"></div>
-    </section>
-  </div>
+  const sess = getSession();
+  if(!sess?.token){
+    location.href = "/";
+    return;
+  }
+  if(sess.user?.role !== "admin"){
+    location.href = "/";
+    return;
+  }
 
-  <script src="app.js"></script>
-</body>
-</html>
+  $("userBadge").textContent = `${sess.user?.name || "Admin"} • admin`;
+
+  $("btnLogout")?.addEventListener("click", ()=>{
+    clearSession();
+    location.href = "/";
+  });
+
+  // Tabs
+  document.querySelectorAll(".tab").forEach(btn=>{
+    btn.addEventListener("click", ()=>{
+      document.querySelectorAll(".tab").forEach(b=>b.classList.remove("active"));
+      document.querySelectorAll(".tabPane").forEach(p=>p.classList.add("hidden"));
+      btn.classList.add("active");
+      document.getElementById(btn.dataset.tab).classList.remove("hidden");
+    });
+  });
+
+  // Create user
+  $("btnCreateUser").addEventListener("click", async ()=>{
+    setMsg($("adminMsg1"),"");
+    try{
+      const name = $("uName").value.trim();
+      const phone = $("uPhone").value.trim();
+      const email = $("uEmail").value.trim().toLowerCase();
+      const password = $("uPass").value;
+      const role = $("uRole").value;
+
+      await api("/api/admin/users",{method:"POST", body:JSON.stringify({name,phone,email,password,role})});
+      setMsg($("adminMsg1"),"Usuário criado com sucesso!",true);
+      $("uName").value=""; $("uPhone").value=""; $("uEmail").value=""; $("uPass").value="";
+    }catch(e){
+      setMsg($("adminMsg1"), e.message || "Erro ao criar usuário");
+    }
+  });
+
+  // Users list
+  async function loadUsers(){
+    const rows = await api("/api/admin/users");
+    const wrap = $("usersWrap");
+    wrap.innerHTML = `
+      <table>
+        <thead><tr><th>Nome</th><th>Email</th><th>Tipo</th><th>Ativo</th><th>Criado</th></tr></thead>
+        <tbody>
+          ${rows.map(u=>`
+            <tr>
+              <td>${u.name||"-"}</td>
+              <td>${u.email||"-"}</td>
+              <td>${u.role||"-"}</td>
+              <td>${u.active ? "Sim":"Não"}</td>
+              <td>${u.created_at||"-"}</td>
+            </tr>`).join("")}
+        </tbody>
+      </table>
+    `;
+  }
+  $("btnLoadUsers").addEventListener("click", async ()=>{
+    setMsg($("adminMsgUsers"),"");
+    try{ await loadUsers(); setMsg($("adminMsgUsers"),"Lista atualizada.",true); }
+    catch(e){ setMsg($("adminMsgUsers"), e.message || "Erro"); }
+  });
+
+  // Barbers list + select
+  async function loadBarbersAll(){
+    const list = await api("/api/admin/barbers");
+    const wrap = $("barbersWrap");
+    wrap.innerHTML = list.length ? "" : `<div class="muted">Nenhum barbeiro cadastrado.</div>`;
+
+    list.forEach(b=>{
+      const row = document.createElement("div");
+      row.className="listItem";
+      row.innerHTML = `
+        <div><b>${b.name}</b><div class="muted" style="font-size:12px">ID: ${b.id}</div></div>
+        <div class="row"><button class="btn btn-secondary btn-sm">Gerenciar agenda</button></div>
+      `;
+      row.querySelector("button").addEventListener("click", ()=>{
+        document.querySelector('[data-tab="tabAgenda"]').click();
+        $("admSelBarber").value = String(b.id);
+      });
+      wrap.appendChild(row);
+    });
+
+    const sel = $("admSelBarber");
+    sel.innerHTML = `<option value="">Selecione...</option>` +
+      list.filter(x=>x.active===1 || x.active===true)
+          .map(x=>`<option value="${x.id}">${x.name}</option>`).join("");
+  }
+
+  $("btnCreateBarber").addEventListener("click", async ()=>{
+    setMsg($("adminMsg2"),"");
+    try{
+      const name = $("bName").value.trim();
+      await api("/api/admin/barbers",{method:"POST", body:JSON.stringify({name})});
+      $("bName").value="";
+      setMsg($("adminMsg2"),"Barbeiro criado!",true);
+      await loadBarbersAll();
+    }catch(e){
+      setMsg($("adminMsg2"), e.message || "Erro ao criar barbeiro");
+    }
+  });
+
+  $("btnLoadBarbers").addEventListener("click", async ()=>{
+    setMsg($("adminMsg2"),"");
+    try{ await loadBarbersAll(); setMsg($("adminMsg2"),"Lista atualizada.",true); }
+    catch(e){ setMsg($("adminMsg2"), e.message || "Erro"); }
+  });
+
+  // Agenda
+  async function loadAgenda(){
+    setMsg($("adminMsg3"),"");
+    const wrap = $("adminSlotsWrap");
+    wrap.innerHTML="";
+    try{
+      const barber_id = Number($("admSelBarber").value);
+      const date = $("admDate").value;
+      if(!barber_id || !date) throw new Error("Selecione barbeiro e data.");
+      const rows = await api(`/api/admin/slots?barber_id=${barber_id}&date=${encodeURIComponent(date)}`);
+      if(!rows.length){
+        wrap.innerHTML = `<div class="muted">Nenhum horário cadastrado nesse dia.</div>`;
+        return;
+      }
+      wrap.innerHTML = rows.map(r=>{
+        const tag = r.status==="FREE" ? "LIVRE" : r.status==="BLOCKED" ? "BLOQUEADO" : "MARCADO";
+        const client = r.client_name ? ` • ${r.client_name}` : "";
+        const type = r.type ? ` • ${r.type}` : "";
+        return `<div class="slot"><div><b>${r.time}</b> <span class="muted">(${tag}${client}${type})</span></div></div>`;
+      }).join("");
+    }catch(e){
+      setMsg($("adminMsg3"), e.message || "Erro ao carregar");
+    }
+  }
+
+  $("btnCreateSlot").addEventListener("click", async ()=>{
+    setMsg($("adminMsg3"),"");
+    try{
+      const barber_id = Number($("admSelBarber").value);
+      const date = $("admDate").value;
+      const time = $("admTime").value.trim();
+      await api("/api/admin/slots/free",{method:"POST", body:JSON.stringify({barber_id,date,time})});
+      setMsg($("adminMsg3"),"Horário LIVRE criado!",true);
+      await loadAgenda();
+    }catch(e){ setMsg($("adminMsg3"), e.message || "Erro"); }
+  });
+
+  $("btnBlockSlot").addEventListener("click", async ()=>{
+    setMsg($("adminMsg3"),"");
+    try{
+      const barber_id = Number($("admSelBarber").value);
+      const date = $("admDate").value;
+      const time = $("admTime").value.trim();
+      await api("/api/admin/slots/block",{method:"POST", body:JSON.stringify({barber_id,date,time})});
+      setMsg($("adminMsg3"),"Horário BLOQUEADO!",true);
+      await loadAgenda();
+    }catch(e){ setMsg($("adminMsg3"), e.message || "Erro"); }
+  });
+
+  $("btnLoadAdminSlots").addEventListener("click", loadAgenda);
+
+  // Inicial
+  await loadBarbersAll().catch(()=>{});
+}
+
+/* BOOT */
+(async function(){
+  await initIndex();
+  await initAdmin();
+})();
